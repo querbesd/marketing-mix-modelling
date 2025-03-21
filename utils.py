@@ -170,9 +170,7 @@ def logistic_saturation_offset_scale(x, lam, alpha, beta):
 
 def plot_shap_vs_spend(
     df_shap_values,
-    x_input_original,
     x_input_transformed,
-    features,
     media_channels,
     figsize=(15, 7),
     fit_lambda=False
@@ -188,8 +186,7 @@ def plot_shap_vs_spend(
         if channel not in x_input_transformed.columns:
             continue
 
-        # Calculate mean spend for non-zero values
-        mean_spend = x_input_original.loc[x_input_original[channel] > 0, channel].mean()
+
 
         fig, ax = plt.subplots(figsize=figsize)
         sns.regplot(
@@ -204,9 +201,6 @@ def plot_shap_vs_spend(
 
         # Reference lines
         ax.axhline(0, linestyle="--", color="black", alpha=0.5)
-        ax.axvline(mean_spend, linestyle="--", color="red", alpha=0.5,
-                   label=f"Average Spend: {mean_spend:.2f}")
-
         if fit_lambda:
             x_data = x_input_transformed[channel].values
             y_data = df_shap_values[channel].values
@@ -232,9 +226,9 @@ def plot_shap_vs_spend(
             except Exception as e:
                 print(f"Logistic fit failed for {channel}: {e}")
 
-        ax.set_xlabel(f"{channel} spend")
-        ax.set_ylabel(f"SHAP Value for {channel}")
-        plt.legend()
+        ax.set_xlabel(f"{channel} transformed spend")
+        ax.set_ylabel(f"SHAP Value")
+
         plt.tight_layout()
         plt.show()
 
@@ -275,3 +269,356 @@ def shap_feature_importance(shap_values, data, figsize=(15, 8)):
     ax.set_xlabel("SHAP Value (Red = Positive Impact)")
     plt.tight_layout()
     plt.show()
+
+def visualize_roas(roas_results, countries=None, channels=None, plot_type='bar'):
+        """
+        Visualize ROAS results
+
+        Parameters:
+        -----------
+        roas_results : dict
+            Dictionary of ROAS results
+        countries : list, optional
+            List of countries to visualize, defaults to all
+        channels : list, optional
+            List of channels to visualize, defaults to all
+        plot_type : str, optional
+            Type of plot to create ('bar' or 'heatmap')
+
+        Returns:
+        --------
+        matplotlib.figure.Figure
+            The matplotlib figure object
+        """
+
+        # If no countries specified, use all
+        if countries is None:
+            countries = list(roas_results.keys())
+
+        # Prepare data for plotting
+        plot_data = []
+
+        for country in countries:
+            # If no channels specified, use all except 'overall'
+            country_channels = channels if channels else [ch for ch in roas_results[country].keys() if ch != 'overall']
+
+            for channel in country_channels:
+                # Get ROAS value
+                roas_value = roas_results[country][channel].get('roas',
+                            roas_results[country][channel].get('incremental_roas', np.nan))
+
+                # Add to plot data
+                plot_data.append({
+                    'Country': country,
+                    'Channel': channel,
+                    'ROAS': roas_value
+                })
+
+        # Convert to DataFrame
+        df = pd.DataFrame(plot_data)
+
+        # Create appropriate plot
+        if plot_type == 'heatmap':
+            # Create heatmap
+            plt.figure(figsize=(10, 8))
+            pivot_data = df.pivot(index='Country', columns='Channel', values='ROAS')
+            ax = sns.heatmap(pivot_data, annot=True, cmap='RdYlGn', center=1.0, fmt='.2f',
+                            linewidths=0.5, cbar_kws={'label': 'ROAS'})
+            plt.title('ROAS by Country and Channel', fontsize=16)
+            plt.tight_layout()
+
+        else:  # Default to bar plot
+            # Create grouped bar plot
+            plt.figure(figsize=(12, 8))
+            ax = sns.barplot(x='Channel', y='ROAS', hue='Country', data=df)
+
+
+
+            # Add labels and title
+            plt.xlabel('Channel', fontsize=14)
+            plt.ylabel('ROAS', fontsize=14)
+            plt.title('ROAS by Channel', fontsize=16)
+
+            # Add value labels on bars
+            for i, bar in enumerate(ax.patches):
+                height = bar.get_height()
+                if not np.isnan(height):
+                    ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        height + 0.05,
+                        f'{height:.0f}',
+                        ha='center', va='bottom'
+                    )
+
+            plt.grid(axis='y', alpha=0.3, linestyle='--')
+            plt.tight_layout()
+
+        return plt.gcf()
+
+def calculate_incremental_roas(model, X, media_columns, data_indices, verbose=True):
+    """Calculate incremental ROAS using model's built-in zero-out functionality"""
+
+    # Get data for specified indices
+    X_data = X.iloc[data_indices] if hasattr(data_indices, '__iter__') else X.loc[data_indices]
+
+
+    try:
+        baseline_prediction = model.predict(test_indices=data_indices)
+        if verbose:
+            print(f"Generated baseline predictions, shape: {baseline_prediction.shape}")
+    except Exception as e:
+        if verbose:
+            print(f"Error using model's predict method: {e}")
+        raise ValueError("Baseline prediction required but couldn't be generated")
+
+    # Initialize results
+    roas_results = {}
+
+    # For each channel, zero it out and calculate ROAS
+    for channel in media_columns:
+        if verbose:
+            print(f"  Processing channel: {channel}")
+
+        # Store original spend data
+        original_spend = X_data[channel].values
+        total_spend = np.sum(original_spend)
+
+        if total_spend <= 0:
+            if verbose:
+                print(f"  Skipping {channel} - no spend in selected timeframe")
+            roas_results[channel] = {
+                'incremental_contribution': 0.0,
+                'total_spend': 0.0,
+                'incremental_roas': np.nan
+            }
+            continue
+
+        try:
+            # Get prediction with channel zeroed out
+            zeroed_prediction = model.predict(
+                test_indices=data_indices,
+                zero_media_columns=[channel]
+            )
+
+            # Calculate incremental contribution
+            incremental_contribution = np.sum(baseline_prediction - zeroed_prediction)
+
+            # Calculate ROAS
+            if total_spend > 0:
+                roas = incremental_contribution / total_spend
+            else:
+                roas = np.nan
+
+            if verbose:
+                print(f"    Baseline sum: {np.sum(baseline_prediction):.2f}")
+                print(f"    Zeroed-out sum: {np.sum(zeroed_prediction):.2f}")
+                print(f"    Incremental contribution: {incremental_contribution:.2f}")
+                print(f"    Total spend: {total_spend:.2f}")
+                print(f"    Incremental ROAS: {roas:.2f}")
+
+            # Store results
+            roas_results[channel] = {
+                'incremental_contribution': float(incremental_contribution),
+                'total_spend': float(total_spend),
+                'incremental_roas': float(roas),
+                'baseline_prediction_sum': float(np.sum(baseline_prediction)),
+                'zeroed_prediction_sum': float(np.sum(zeroed_prediction))
+            }
+
+        except Exception as e:
+            if verbose:
+                print(f"  Error calculating ROAS for {channel}: {e}")
+                import traceback
+                traceback.print_exc()
+
+            roas_results[channel] = {
+                'incremental_contribution': np.nan,
+                'total_spend': float(total_spend),
+                'incremental_roas': np.nan
+            }
+
+    return roas_results
+
+
+def compare_all_models_roas(results, X, media_columns, data_indices, data_type='test', verbose=True):
+    """
+    Compare incremental ROAS across all models.
+
+    Parameters:
+    -----------
+    results : dict
+        Dictionary of model results from run_mmm_analysis
+    X : DataFrame
+        Feature data
+    media_columns : list
+        List of media channel columns
+    data_indices : list or array-like
+        Indices of data to use for calculation
+    data_type : str, optional
+        Type of data being analyzed ('test' or 'train')
+    verbose : bool, optional
+        Whether to print detailed output
+
+    Returns:
+    --------
+    dict
+        Dictionary of ROAS results by model and channel
+    """
+
+    # Extract models from results
+    models_dict = results['models']
+
+    # Initialize dictionary to store ROAS results
+    all_roas_results = {}
+
+    # Calculate ROAS for each model
+    for model_name, model in models_dict.items():
+        if verbose:
+            print(f"\nCalculating incremental ROAS for {model_name}...")
+
+        try:
+            # Calculate ROAS for this model
+            model_roas = calculate_incremental_roas(
+                model=model,
+                X=X,
+                media_columns=media_columns,
+                data_indices=data_indices,
+                verbose=verbose
+            )
+
+            # Store results
+            all_roas_results[model_name] = model_roas
+
+        except Exception as e:
+            if verbose:
+                print(f"Error calculating ROAS for {model_name}: {e}")
+                import traceback
+                traceback.print_exc()
+
+            # Create empty results for this model
+            all_roas_results[model_name] = {
+                channel: {
+                    'incremental_contribution': np.nan,
+                    'total_spend': np.nan,
+                    'incremental_roas': np.nan
+                } for channel in media_columns
+            }
+
+    # Visualize the comparison
+    try:
+        if verbose:
+            print("\nVisualizing ROAS comparison across models...")
+        visualize_models_roas_comparison(all_roas_results, media_columns)
+    except Exception as e:
+        if verbose:
+            print(f"Error visualizing ROAS comparison: {e}")
+
+    return all_roas_results
+
+
+def visualize_models_roas_comparison(all_roas_results, media_columns):
+    """
+    Visualize ROAS comparison across all models.
+
+    Parameters:
+    -----------
+    all_roas_results : dict
+        Dictionary with ROAS results by model and channel
+    media_columns : list
+        List of media channel columns
+    """
+
+    # Create DataFrame for visualization
+    roas_data = []
+
+    for model_name, model_results in all_roas_results.items():
+        for channel, metrics in model_results.items():
+            roas_data.append({
+                'Model': model_name,
+                'Channel': channel,
+                'ROAS': metrics.get('incremental_roas', np.nan)
+            })
+
+    df = pd.DataFrame(roas_data)
+
+    # Check if we have any valid ROAS values
+    if df.empty or df['ROAS'].isna().all():
+        print("No valid ROAS values to visualize!")
+        return
+
+    # Create plot
+    plt.figure(figsize=(12, 8))
+
+    # Set up positions for grouped bars
+    channels = media_columns
+    models = list(all_roas_results.keys())
+    x = np.arange(len(channels))
+    width = 0.8 / len(models)  # Width of bars
+
+    # Colors for different models
+    colors = plt.cm.tab10.colors
+
+    # Plot bars for each model
+    for i, model in enumerate(models):
+        model_data = df[df['Model'] == model]
+        roas_values = []
+
+        # Ensure correct order of channels
+        for channel in channels:
+            channel_roas = model_data[model_data['Channel'] == channel]['ROAS'].values
+            roas_values.append(channel_roas[0] if len(channel_roas) > 0 else np.nan)
+
+        # Plot bars, skipping NaN values
+        valid_indices = ~np.isnan(roas_values)
+        bar_positions = x[valid_indices] + (i - len(models)/2 + 0.5) * width
+
+        plt.bar(
+            bar_positions,
+            np.array(roas_values)[valid_indices],
+            width,
+            label=model,
+            color=colors[i % len(colors)]
+        )
+
+        # Add value labels on bars
+        for j, (idx, val) in enumerate(zip(valid_indices, roas_values)):
+            if idx:
+                pos = x[j] + (i - len(models)/2 + 0.5) * width
+                plt.text(
+                    pos, val + 0.1,
+                    f"{val:.0f}",
+                    ha='center', va='bottom',
+                    fontsize=12,
+                    rotation=90 if val > 10 else 0
+                )
+
+    # Add labels and formatting
+    plt.xlabel('Media Channel', fontsize=14)
+    plt.ylabel('Incremental ROAS', fontsize=14)
+    plt.title('Incremental ROAS Comparison Across Models', fontsize=18)
+    plt.xticks(x, channels)
+    plt.grid(axis='y', alpha=0.3, linestyle='--')
+    plt.legend()
+
+    # Set reasonable y-axis limits
+    valid_values = df['ROAS'].dropna().values
+    if len(valid_values) > 0:
+        max_val = max(valid_values)
+        median_val = np.median(valid_values)
+
+        if max_val > 5 * median_val and max_val > 20:
+            # If we have outliers, cap the y-axis
+            plt.ylim(0, min(20, median_val * 3))
+            print(f"Note: Y-axis capped at {min(20, median_val * 3):.1f} for better visualization")
+            print(f"      Some values may be higher: max={max_val:.1f}")
+
+    plt.tight_layout()
+
+    # Show table with values
+    print("\nROAS Comparison Table:")
+    pivot_table = df.pivot(index='Channel', columns='Model', values='ROAS')
+    print(pivot_table.round(2))
+
+    plt.show()
+
+    return df

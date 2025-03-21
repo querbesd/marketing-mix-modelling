@@ -65,12 +65,25 @@ class MMM_Base:
 
 
 
-    def rssd(self, effect_share, spend_share):
-        """Calculate Root Sum Square Distance between effect and spend shares"""
-        return np.sqrt(np.sum((effect_share - spend_share) ** 2))
+    # def rssd(self, effect_share, spend_share):
+    #     """Calculate Root Sum Square Distance between effect and spend shares"""
+    #     return np.sqrt(np.sum((effect_share - spend_share) ** 2))
 
 
-    def optimize(self, X, y, media_cols, n_trials=50, cv_splits=3, test_size=20, is_multiobjective=True):
+    def reset(self):
+        """Clear cached computations and reset model to initial state"""
+        self.best_alphas = None
+        self.best_params = None
+        # Clear any other instance variables that should be reset
+        if hasattr(self, 'X_full_transformed'):
+            del self.X_full_transformed
+        if hasattr(self, 'X_full_adstocked'):
+            del self.X_full_adstocked
+        if hasattr(self, 'feature_names'):
+            del self.feature_names
+
+
+    def optimize(self, X, y, media_cols, n_trials=50, cv_splits=3, test_size=20, is_multiobjective=False):
         """
         Optimize model parameters using Optuna
 
@@ -96,12 +109,14 @@ class MMM_Base:
         optuna.study.Study
             Optuna study object with optimization results
         """
+        # Reset model state to ensure a clean start
+        self.reset()
+
         # Setup time series cross-validation
         tscv = TimeSeriesSplit(n_splits=cv_splits, test_size=test_size)
 
         # Create study - different for single vs multi-objective
         if is_multiobjective:
-            print("Using multi-objective optimization (RMSE and RSSD)")
             study = optuna.create_study(
                 directions=["minimize", "minimize"],
                 sampler=optuna.samplers.NSGAIISampler(seed=42)
@@ -112,18 +127,52 @@ class MMM_Base:
         # Run optimization
         study.optimize(
             lambda trial: self._objective(trial, X, y, media_cols, tscv, is_multiobjective),
-            n_trials=n_trials
+            n_trials=n_trials,
+            show_progress_bar=False
         )
 
         # Get best parameters - handle differently for multi-objective
         if is_multiobjective:
-            # For multi-objective, select one of the Pareto-optimal solutions
-            # Here we choose the one with best RMSE as default
+            # Get all Pareto-optimal solutions
             best_trials = study.best_trials
-            best_trial = min(best_trials, key=lambda t: t.values[0])  # Minimize RMSE
-            self.best_params = best_trial.params
+            print(f"Number of best_trials: {len(best_trials)}")
+
+            # Calculate best possible metrics
+            min_rmse = min(trial.values[0] for trial in best_trials)
+            min_rssd = min(trial.values[1] for trial in best_trials)
+            print(f"Best possible RMSE: {min_rmse:.4f}, Best possible RSSD: {min_rssd:.4f}")
+
+            # Average parameters from all Pareto-optimal models
+            avg_params = {}
+            param_counts = {}
+
+            for trial in best_trials:
+                for param_name, param_value in trial.params.items():
+                    # Handle numeric parameters
+                    if isinstance(param_value, (int, float)):
+                        if param_name not in avg_params:
+                            avg_params[param_name] = 0.0
+                            param_counts[param_name] = 0
+
+                        avg_params[param_name] += param_value
+                        param_counts[param_name] += 1
+
+            # Calculate averages
+            for param_name in avg_params:
+                avg_params[param_name] /= param_counts[param_name]
+
+                # Convert back to integer if the original parameter was an integer
+                # (This is important for parameters like n_estimators)
+                if param_name in best_trials[0].params and isinstance(best_trials[0].params[param_name], int):
+                    avg_params[param_name] = int(round(avg_params[param_name]))
+
+            print("Using averaged parameters from Pareto front:")
+            for param_name, param_value in avg_params.items():
+                print(f"  {param_name}: {param_value}")
+
+            self.best_params = avg_params
         else:
-            # Get best parameters
+            # Get best parameters from single-objective optimization
             self.best_params = study.best_params
 
         # Extract best adstock parameters
@@ -169,59 +218,59 @@ class MMM_Linear(MMM_Base):
         if self.use_scaling:
             self.scaler = StandardScaler()
 
-    def _calculate_spend_effect_share(self, model, X_train, media_cols, X_train_original=None):
-        """
-        Calculate spend effect share for media channels using linear model coefficients
+    # def _calculate_spend_effect_share(self, model, X_train, media_cols, X_train_original=None):
+    #     """
+    #     Calculate spend effect share for media channels using linear model coefficients
 
-        Args:
-            model: fitted Ridge model
-            X_train: training data (possibly scaled)
-            media_cols: list of media channel names
-            X_train_original: original unscaled data (if scaling is used)
+    #     Args:
+    #         model: fitted Ridge model
+    #         X_train: training data (possibly scaled)
+    #         media_cols: list of media channel names
+    #         X_train_original: original unscaled data (if scaling is used)
 
-        Returns:
-            effect_share: array of effect shares for media channels
-            spend_share: array of spend shares for media channels
-        """
-        # Get model coefficients
-        coefficients = model.coef_
+    #     Returns:
+    #         effect_share: array of effect shares for media channels
+    #         spend_share: array of spend shares for media channels
+    #     """
+    #     # Get model coefficients
+    #     coefficients = model.coef_
 
-        # Create a dict of column index to coefficient
-        coef_dict = {col: coef for col, coef in zip(X_train.columns, coefficients)}
+    #     # Create a dict of column index to coefficient
+    #     coef_dict = {col: coef for col, coef in zip(X_train.columns, coefficients)}
 
-        # Calculate effect using |coefficient × mean(feature)|
-        # If scaling is used, we need to adjust by the standard deviation
-        media_effects = {}
-        for col in media_cols:
-            if self.use_scaling and self.scaler is not None:
-                # Find the index of this column in the scaler
-                col_idx = list(X_train.columns).index(col)
-                # Get the standard deviation used for scaling
-                col_std = self.scaler.scale_[col_idx]
-                # Use the standard deviation to adjust the effect
-                media_effects[col] = abs(coef_dict[col] * col_std)
-            else:
-                # For unscaled data, use the mean of the feature
-                media_effects[col] = abs(coef_dict[col] * X_train[col].mean())
+    #     # Calculate effect using |coefficient × mean(feature)|
+    #     # If scaling is used, we need to adjust by the standard deviation
+    #     media_effects = {}
+    #     for col in media_cols:
+    #         if self.use_scaling and self.scaler is not None:
+    #             # Find the index of this column in the scaler
+    #             col_idx = list(X_train.columns).index(col)
+    #             # Get the standard deviation used for scaling
+    #             col_std = self.scaler.scale_[col_idx]
+    #             # Use the standard deviation to adjust the effect
+    #             media_effects[col] = abs(coef_dict[col] * col_std)
+    #         else:
+    #             # For unscaled data, use the mean of the feature
+    #             media_effects[col] = abs(coef_dict[col] * X_train[col].mean())
 
-        # Calculate effect share
-        total_effect = sum(media_effects.values())
-        if total_effect > 0:
-            effect_share = np.array([media_effects[col]/total_effect for col in media_cols])
-        else:
-            # Fallback to equal effect shares if all effects are zero
-            effect_share = np.ones(len(media_cols)) / len(media_cols)
+    #     # Calculate effect share
+    #     total_effect = sum(media_effects.values())
+    #     if total_effect > 0:
+    #         effect_share = np.array([media_effects[col]/total_effect for col in media_cols])
+    #     else:
+    #         # Fallback to equal effect shares if all effects are zero
+    #         effect_share = np.ones(len(media_cols)) / len(media_cols)
 
-        # Calculate spend share from original data
-        X_for_spend = X_train_original if X_train_original is not None else X_train
-        total_spend = X_for_spend[media_cols].sum().sum()
-        if total_spend > 0:
-            spend_share = np.array([X_for_spend[col].sum()/total_spend for col in media_cols])
-        else:
-            # Fallback to equal spend shares if all spends are zero
-            spend_share = np.ones(len(media_cols)) / len(media_cols)
+    #     # Calculate spend share from original data
+    #     X_for_spend = X_train_original if X_train_original is not None else X_train
+    #     total_spend = X_for_spend[media_cols].sum().sum()
+    #     if total_spend > 0:
+    #         spend_share = np.array([X_for_spend[col].sum()/total_spend for col in media_cols])
+    #     else:
+    #         # Fallback to equal spend shares if all spends are zero
+    #         spend_share = np.ones(len(media_cols)) / len(media_cols)
 
-        return effect_share, spend_share
+    #     return effect_share, spend_share
 
     def _objective(self, trial, X, y, media_cols, tscv, is_multiobjective=False):
         """Optuna objective function for linear model"""
@@ -283,7 +332,7 @@ class MMM_Linear(MMM_Base):
                         # Calculate effect and spend shares
                         effect_share, spend_share = self._calculate_spend_effect_share(
                             model=model,
-                            X_train=X_train_scaled,
+                            X_train=X_val_scaled,
                             media_cols=media_cols,
                             X_train_original=X_train
                         )
@@ -357,13 +406,64 @@ class MMM_Linear(MMM_Base):
         self.feature_names = X_train.columns
 
         return self
+    @property
+    def coef_(self):
+        """Return the linear model coefficients"""
+        return self.model.coef_
 
-    def predict(self, test_indices=None, X_new=None, media_cols=None):
-        """Make predictions with the linear model"""
+    @property
+    def intercept_(self):
+        """Return the linear model intercept"""
+        return self.model.intercept_
+
+
+    def predict(self, test_indices=None, X_new=None, media_cols=None, zero_media_columns=None):
+        """
+        Make predictions with the linear model
+
+        Parameters:
+        -----------
+        test_indices : array-like, optional
+            Indices to use from the stored full dataset
+        X_new : DataFrame, optional
+            New data to use instead of stored data
+        media_cols : list, optional
+            List of media columns, needed if X_new is provided
+        zero_media_columns : list, optional
+            List of media columns to zero out in the prediction
+        """
         if test_indices is not None:
             # Use indices to get the test set from the stored full dataset
-            X = self.X_full_transformed.iloc[test_indices]
+            X = self.X_full_transformed.iloc[test_indices].copy()  # Make a copy to avoid modifying original
+
+            # Zero out specified media columns if requested
+            if zero_media_columns is not None:
+                # Identify all columns related to the specified media channels
+                for channel in zero_media_columns:
+                    # Zero out the original channel if it exists
+                    if channel in X.columns:
+                        X[channel] = 0
+
+                    # Zero out derived features (adstocked and saturated versions)
+                    col_patterns = [
+                        f"{channel}_adstocked",
+                        f"{channel}_adstocked_saturated"
+                    ]
+
+                    for col in X.columns:
+                        if any(pattern in col for pattern in col_patterns):
+                            X[col] = 0
+
         elif X_new is not None:
+            # Make a copy of the input data
+            X_to_process = X_new.copy()
+
+            # Zero out specified media columns in the input data if requested
+            if zero_media_columns is not None:
+                for channel in zero_media_columns:
+                    if channel in X_to_process.columns:
+                        X_to_process[channel] = 0
+
             # Apply transformation to new data if needed
             if media_cols is not None and self.best_alphas is not None:
                 # Extract best lambdas if saturation is applied
@@ -376,9 +476,9 @@ class MMM_Linear(MMM_Base):
                     }
 
                 # Apply transformation (adstock and optional saturation)
-                X = self._apply_transformation(X_new, self.best_alphas, best_lambdas, media_cols)
+                X = self._apply_transformation(X_to_process, self.best_alphas, best_lambdas, media_cols)
             else:
-                X = X_new
+                X = X_to_process
         else:
             raise ValueError("Either test_indices or X_new must be provided")
 
@@ -431,56 +531,56 @@ class MMM_TreeBased(MMM_Base):
             raise ValueError("model_type must be 'gb' or 'rf'")
 
 
-    def _calculate_spend_effect_share(self, model, X_train, media_cols):
-        """
-        Calculate spend effect share for media channels
+    # def _calculate_spend_effect_share(self, model, X_train, media_cols):
+    #     """
+    #     Calculate spend effect share for media channels
 
-        Args:
-            model: trained tree-based model
-            X_train: training data
-            media_cols: list of media channel names
+    #     Args:
+    #         model: trained tree-based model
+    #         X_train: training data
+    #         media_cols: list of media channel names
 
-        Returns:
-            effect_share: array of effect shares for media channels
-            spend_share: array of spend shares for media channels
-        """
-        # Try to use SHAP values if available
-        try:
-            import shap
-            explainer = shap.TreeExplainer(model)
-            shap_values = explainer.shap_values(X_train)
+    #     Returns:
+    #         effect_share: array of effect shares for media channels
+    #         spend_share: array of spend shares for media channels
+    #     """
+    #     # Try to use SHAP values if available
+    #     try:
+    #         import shap
+    #         explainer = shap.TreeExplainer(model)
+    #         shap_values = explainer.shap_values(X_train)
 
-            # Calculate absolute SHAP values for each media feature
-            media_effects = {}
-            for i, col in enumerate(X_train.columns):
-                if col in media_cols:
-                    media_effects[col] = np.abs(shap_values[:, i]).sum()
-        except Exception:
-            # Fall back to feature importance
-            importances = model.feature_importances_
+    #         # Calculate absolute SHAP values for each media feature
+    #         media_effects = {}
+    #         for i, col in enumerate(X_train.columns):
+    #             if col in media_cols:
+    #                 media_effects[col] = np.abs(shap_values[:, i]).sum()
+    #     except Exception:
+    #         # Fall back to feature importance
+    #         importances = model.feature_importances_
 
-            media_effects = {}
-            for i, col in enumerate(X_train.columns):
-                if col in media_cols:
-                    media_effects[col] = importances[i]
+    #         media_effects = {}
+    #         for i, col in enumerate(X_train.columns):
+    #             if col in media_cols:
+    #                 media_effects[col] = importances[i]
 
-        # Calculate effect share
-        if sum(media_effects.values()) > 0:
-            total_effect = sum(media_effects.values())
-            effect_share = np.array([media_effects[col]/total_effect for col in media_cols])
-        else:
-            # Fallback to equal effect shares if all effects are zero
-            effect_share = np.ones(len(media_cols)) / len(media_cols)
+    #     # Calculate effect share
+    #     if sum(media_effects.values()) > 0:
+    #         total_effect = sum(media_effects.values())
+    #         effect_share = np.array([media_effects[col]/total_effect for col in media_cols])
+    #     else:
+    #         # Fallback to equal effect shares if all effects are zero
+    #         effect_share = np.ones(len(media_cols)) / len(media_cols)
 
-        # Calculate spend share from original data
-        total_spend = X_train[media_cols].sum().sum()
-        if total_spend > 0:
-            spend_share = np.array([X_train[col].sum()/total_spend for col in media_cols])
-        else:
-            # Fallback to equal spend shares if all spends are zero
-            spend_share = np.ones(len(media_cols)) / len(media_cols)
+    #     # Calculate spend share from original data
+    #     total_spend = X_train[media_cols].sum().sum()
+    #     if total_spend > 0:
+    #         spend_share = np.array([X_train[col].sum()/total_spend for col in media_cols])
+    #     else:
+    #         # Fallback to equal spend shares if all spends are zero
+    #         spend_share = np.ones(len(media_cols)) / len(media_cols)
 
-        return effect_share, spend_share
+    #     return effect_share, spend_share
 
     def _objective(self, trial, X, y, media_cols, tscv, is_multiobjective=False):
         """Optuna objective function for tree-based model"""
@@ -547,7 +647,7 @@ class MMM_TreeBased(MMM_Base):
                         # Calculate effect and spend shares
                         effect_share, spend_share = self._calculate_spend_effect_share(
                             model=model,
-                            X_train=X_train,
+                            X_train=X_val,
                             media_cols=media_cols
                         )
 
@@ -625,17 +725,49 @@ class MMM_TreeBased(MMM_Base):
 
         return self
 
-    def predict(self, test_indices=None, X_new=None, media_cols=None):
-        """Make predictions with the tree-based model"""
+    def predict(self, test_indices=None, X_new=None, media_cols=None, zero_media_columns=None):
+        """
+        Make predictions with the tree-based model
+
+        Parameters:
+        -----------
+        test_indices : array-like, optional
+            Indices to use from the stored full dataset
+        X_new : DataFrame, optional
+            New data to use instead of stored data
+        media_cols : list, optional
+            List of media columns, needed if X_new is provided
+        zero_media_columns : list, optional
+            List of media columns to zero out in the prediction
+        """
         if test_indices is not None:
             # Use indices to get the test set from the stored full dataset
-            X = self.X_full_adstocked.iloc[test_indices]
+            X = self.X_full_adstocked.iloc[test_indices].copy()  # Make a copy to avoid modifying original
+
+            # Zero out specified media columns if requested
+            if zero_media_columns is not None:
+                # Identify all columns related to the specified media channels
+                for channel in zero_media_columns:
+                    # Zero out the original channel and any derived features
+                    for col in X.columns:
+                        if col == channel or (f"{channel}_" in col):
+                            X[col] = 0
+
         elif X_new is not None:
-            # Apply adstock to new data if needed
+            # Make a copy of the input data
+            X_to_process = X_new.copy()
+
+            # Zero out specified media columns in the input data if requested
+            if zero_media_columns is not None:
+                for channel in zero_media_columns:
+                    if channel in X_to_process.columns:
+                        X_to_process[channel] = 0
+
+            # Apply adstock to the data (with zeroed channels if specified)
             if media_cols is not None and self.best_alphas is not None:
-                X = self._apply_adstock(X_new, self.best_alphas, media_cols)
+                X = self._apply_adstock(X_to_process, self.best_alphas, media_cols)
             else:
-                X = X_new
+                X = X_to_process
         else:
             raise ValueError("Either test_indices or X_new must be provided")
 
@@ -662,7 +794,7 @@ class MMM_EnsembleBased(MMM_Base):
     2. Then, a tree-based model is trained on the residuals to capture nonlinear patterns
     """
 
-    def __init__(self, alpha_ranges=None, l_max=8, model_type='gb'):
+    def __init__(self, alpha_ranges=None, l_max=8, model_type='rf'):
         super().__init__(alpha_ranges, l_max)
         self.model_type = model_type
         self.linear_model = Ridge(alpha=1.0)
@@ -703,73 +835,77 @@ class MMM_EnsembleBased(MMM_Base):
                 random_state=42
             )
 
-    def _calculate_spend_effect_share(self, linear_model, tree_model, X_train, media_cols):
-        """
-        Calculate spend effect share for media channels
+    # def _calculate_spend_effect_share(self, X_train, media_cols):
+    #     """
+    #     Calculate spend effect share for media channels using SHAP decomposition
+    #     of the full stacked model.
 
-        Args:
-            linear_model: fitted Ridge model
-            tree_model: fitted tree model
-            X_train: training data
-            media_cols: list of media channel names
+    #     Args:
+    #         X_train: training data (pandas DataFrame)
+    #         media_cols: list of media channel names
 
-        Returns:
-            effect_share: array of effect shares for media channels
-            spend_share: array of spend shares for media channels
-        """
-        # Linear model effects (via coefficients)
-        linear_coefs = linear_model.coef_
-        linear_effects = {}
-        for i, col in enumerate(X_train.columns):
-            if col in media_cols:
-                linear_effects[col] = abs(linear_coefs[i] * X_train[col].mean())
+    #     Returns:
+    #         effect_share: array of effect shares for media channels
+    #         spend_share: array of spend shares for media channels
+    #     """
+    #     import shap
+    #     import numpy as np
 
-        # Tree model effects (via SHAP or feature importance)
-        try:
-            # Try to use SHAP values if available
-            import shap
-            explainer = shap.TreeExplainer(tree_model)
-            shap_values = explainer.shap_values(X_train)
+    #     # Create a wrapper function that combines predictions from both models
+    #     def stacked_model_predict(X):
+    #         # Convert to numpy for consistency if it's not already
+    #         if isinstance(X, pd.DataFrame):
+    #             X = X.values
 
-            tree_effects = {}
-            for i, col in enumerate(X_train.columns):
-                if col in media_cols:
-                    tree_effects[col] = np.abs(shap_values[:, i]).sum()
-        except Exception:
-            # Fall back to feature importance
-            if hasattr(tree_model, 'feature_importances_'):
-                importances = tree_model.feature_importances_
+    #         # Reshape if needed (KernelExplainer sometimes passes 1D arrays)
+    #         if len(X.shape) == 1:
+    #             X = X.reshape(1, -1)
 
-                tree_effects = {}
-                for i, col in enumerate(X_train.columns):
-                    if col in media_cols:
-                        tree_effects[col] = importances[i]
-            else:
-                # If tree model has no feature importances, use zeros
-                tree_effects = {col: 0 for col in media_cols}
+    #         # Create DataFrame with proper column names if X is numpy array
+    #         if not isinstance(X, pd.DataFrame):
+    #             X_df = pd.DataFrame(X, columns=X_train.columns)
+    #         else:
+    #             X_df = X
 
-        # Sum effects from both models
-        media_effects = {}
-        for col in media_cols:
-            media_effects[col] = linear_effects.get(col, 0) + tree_effects.get(col, 0)
+    #         # Get predictions from linear model
+    #         linear_preds = self.linear_model.predict(X_df)
 
-        # Calculate effect share
-        if sum(media_effects.values()) > 0:
-            total_effect = sum(media_effects.values())
-            effect_share = np.array([media_effects[col]/total_effect for col in media_cols])
-        else:
-            # Fallback to equal effect shares if all effects are zero
-            effect_share = np.ones(len(media_cols)) / len(media_cols)
+    #         # Get predictions from tree model
+    #         tree_preds = self.tree_model.predict(X_df)
 
-        # Calculate spend share from original data
-        total_spend = X_train[media_cols].sum().sum()
-        if total_spend > 0:
-            spend_share = np.array([X_train[col].sum()/total_spend for col in media_cols])
-        else:
-            # Fallback to equal spend shares if all spends are zero
-            spend_share = np.ones(len(media_cols)) / len(media_cols)
+    #         # Return combined predictions (linear + residual correction)
+    #         return linear_preds + tree_preds
 
-        return effect_share, spend_share
+    #     # Create background dataset for KernelExplainer
+    #     # Using a subset of training data for efficiency
+    #     if len(X_train) > 100:
+    #         background = shap.sample(X_train, 100, random_state=42)
+    #     else:
+    #         background = X_train
+
+    #     # Initialize KernelExplainer for the stacked model
+    #     explainer = shap.KernelExplainer(stacked_model_predict, background)
+
+    #     # Calculate SHAP values
+    #     # Use nsamples parameter to control computation time vs. accuracy tradeoff
+    #     shap_values = explainer.shap_values(X_train, nsamples=100, silent=True)
+
+    #     # Calculate absolute SHAP values for each media feature
+    #     media_effects = {}
+    #     for col in media_cols:
+    #         col_idx = list(X_train.columns).index(col)
+    #         # Sum of absolute SHAP values indicates overall feature importance
+    #         media_effects[col] = np.abs(shap_values[:, col_idx]).sum()
+
+    #     # Calculate effect share
+    #     total_effect = sum(media_effects.values())
+    #     effect_share = np.array([media_effects[col]/total_effect for col in media_cols])
+
+    #     # Calculate spend share from original data
+    #     total_spend = X_train[media_cols].sum().sum()
+    #     spend_share = np.array([X_train[col].sum()/total_spend for col in media_cols])
+
+    #     return effect_share, spend_share
 
     def _objective(self, trial, X, y, media_cols, tscv, is_multiobjective=False):
         """Optuna objective function for stacked ensemble model"""
@@ -787,7 +923,7 @@ class MMM_EnsembleBased(MMM_Base):
 
         # Suggest tree model parameters based on model type
         if self.model_type == 'gb':
-            learning_rate = trial.suggest_float("learning_rate", 0.01, 0.3, log=True)
+            learning_rate = trial.suggest_float("learning_rate", 0.01, 0.1, log=True)
             n_estimators = trial.suggest_int("n_estimators", 50, 300)
             max_depth = trial.suggest_int("max_depth", 2, 6)
 
@@ -847,11 +983,13 @@ class MMM_EnsembleBased(MMM_Base):
                 # For multi-objective optimization, calculate RSSD
                 if is_multiobjective:
                     try:
-                        # Calculate effect and spend shares
+                        # Store models temporarily to use in _calculate_spend_effect_share
+                        self.linear_model = linear_model
+                        self.tree_model = tree_model
+
+                        # Calculate effect and spend shares with the new method signature
                         effect_share, spend_share = self._calculate_spend_effect_share(
-                            linear_model=linear_model,
-                            tree_model=tree_model,
-                            X_train=X_train,
+                            X_train=X_val,
                             media_cols=media_cols
                         )
 
@@ -943,17 +1081,49 @@ class MMM_EnsembleBased(MMM_Base):
 
         return self
 
-    def predict(self, test_indices=None, X_new=None, media_cols=None):
-        """Make predictions with the stacked ensemble model"""
+    def predict(self, test_indices=None, X_new=None, media_cols=None, zero_media_columns=None):
+        """
+        Make predictions with the stacked ensemble model
+
+        Parameters:
+        -----------
+        test_indices : array-like, optional
+            Indices to use from the stored full dataset
+        X_new : DataFrame, optional
+            New data to use instead of stored data
+        media_cols : list, optional
+            List of media columns, needed if X_new is provided
+        zero_media_columns : list, optional
+            List of media columns to zero out in the prediction
+        """
         if test_indices is not None:
             # Use indices to get the test set from the stored full dataset
-            X = self.X_full_adstocked.iloc[test_indices]
+            X = self.X_full_adstocked.iloc[test_indices].copy()  # Make a copy to avoid modifying original
+
+            # Zero out specified media columns if requested
+            if zero_media_columns is not None:
+                # Identify all columns related to the specified media channels
+                for channel in zero_media_columns:
+                    # Zero out the original channel and any derived features
+                    for col in X.columns:
+                        if col == channel or (f"{channel}_" in col):
+                            X[col] = 0
+
         elif X_new is not None:
-            # Apply adstock to new data if needed
+            # Make a copy of the input data
+            X_to_process = X_new.copy()
+
+            # Zero out specified media columns in the input data if requested
+            if zero_media_columns is not None:
+                for channel in zero_media_columns:
+                    if channel in X_to_process.columns:
+                        X_to_process[channel] = 0
+
+            # Apply adstock to the data (with zeroed channels if specified)
             if media_cols is not None and self.best_alphas is not None:
-                X = self._apply_adstock(X_new, self.best_alphas, media_cols)
+                X = self._apply_adstock(X_to_process, self.best_alphas, media_cols)
             else:
-                X = X_new
+                X = X_to_process
         else:
             raise ValueError("Either test_indices or X_new must be provided")
 

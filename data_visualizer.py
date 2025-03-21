@@ -1,10 +1,10 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 from datetime import datetime
 import matplotlib.dates as mdates
 from pymc_marketing.mmm.transformers import geometric_adstock, logistic_saturation
-
 
 
 class MMMVisualizer:
@@ -184,7 +184,7 @@ class MMMVisualizer:
                     color=color_palette['base_response'],
                     linestyle='-',
                     linewidth=3,
-                    label='Base Response (pre-promo)'
+                    label='Base Response'
                 )
 
             # Plot noise component if requested
@@ -603,6 +603,218 @@ class MMMVisualizer:
         return fig
 
     @staticmethod
+    def plot_media_spend(dataset, countries, total_spend=False, split_channels=False):
+        """
+        Simple plot of media spend for each country and channel.
+
+        Parameters:
+        -----------
+        dataset : xarray.Dataset
+            The dataset containing all variables
+        countries : list
+            List of countries to visualize
+        total_spend : bool, default=False
+            If True, include a plot of total spend across all channels
+        split_channels : bool, default=True
+            If True, create separate subplots for each channel
+            If False, plot all channels on a single plot per country
+
+        Returns:
+        --------
+        matplotlib.figure.Figure or list
+            The matplotlib figure object(s)
+        """
+        channels = dataset.coords['channel'].values
+        dates = pd.to_datetime(dataset.coords['date'].values)
+
+        # Set up plot styling
+        plt.rcParams.update({
+            'font.size': 12,
+            'axes.labelsize': 14,
+            'axes.titlesize': 16,
+            'xtick.labelsize': 12,
+            'ytick.labelsize': 12,
+            'legend.fontsize': 12,
+            'figure.titlesize': 18
+        })
+
+        # Create a colormap for channels
+        colors = plt.cm.tab10.colors
+        channel_colors = {channel: colors[i % len(colors)] for i, channel in enumerate(channels)}
+
+        # Add a color for total spend
+        if total_spend:
+            channel_colors['Total'] = '#000000'  # Black for total spend
+
+        # Create figures for each country
+        figure_objects = []
+
+        for country in countries:
+            if split_channels:
+                # Create a grid of subplots, one for each channel
+                n_plots = len(channels) + (1 if total_spend else 0)
+                n_cols = min(3, n_plots)  # Max 3 columns
+                n_rows = (n_plots + n_cols - 1) // n_cols  # Ceiling division
+
+                fig, axes = plt.subplots(
+                    n_rows, n_cols,
+                    figsize=(7 * n_cols, 5 * n_rows),
+                    constrained_layout=True
+                )
+
+                # Handle case when there's only one row or one column
+                if n_rows == 1 and n_cols == 1:
+                    axes = np.array([[axes]])
+                elif n_rows == 1:
+                    axes = axes.reshape(1, -1)
+                elif n_cols == 1:
+                    axes = axes.reshape(-1, 1)
+
+                # Flatten axes for easier indexing
+                axes_flat = axes.flatten()
+
+                # Add overall title
+                fig.suptitle(
+                    f'Media Spend for {country}',
+                    fontsize=20,
+                    fontweight='bold',
+                    y=0.98
+                )
+
+                # Plot each channel
+                for ch_idx, channel in enumerate(channels):
+                    ax = axes_flat[ch_idx]
+
+                    # Get spend data
+                    spend = dataset.spends.sel(country=country, channel=channel).values
+
+                    # Plot spend
+                    ax.plot(
+                        dates,
+                        spend,
+                        color=channel_colors[channel],
+                        linewidth=2.5,
+                        label=channel
+                    )
+
+                    # Add labels and styling
+                    ax.set_title(f'{channel} Spend', fontsize=16, pad=10)
+                    ax.set_xlabel('Date', fontsize=14, labelpad=10)
+                    ax.set_ylabel('Spend', fontsize=14, labelpad=10)
+                    ax.grid(True, linestyle='--', alpha=0.6)
+
+                    # Format x-axis dates
+                    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+                    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+                    plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+
+                # Plot total spend if requested
+                if total_spend:
+                    ax = axes_flat[len(channels)]
+
+                    # Calculate total spend across all channels
+                    total = np.zeros_like(dataset.spends.sel(country=country, channel=channels[0]).values)
+                    for channel in channels:
+                        total += dataset.spends.sel(country=country, channel=channel).values
+
+                    # Plot total spend
+                    ax.plot(
+                        dates,
+                        total,
+                        color=channel_colors['Total'],
+                        linewidth=2.5,
+                        label='Total Spend'
+                    )
+
+                    # Add labels and styling
+                    ax.set_title('Total Media Spend', fontsize=16, pad=10)
+                    ax.set_xlabel('Date', fontsize=14, labelpad=10)
+                    ax.set_ylabel('Spend', fontsize=14, labelpad=10)
+                    ax.grid(True, linestyle='--', alpha=0.6)
+
+                    # Format x-axis dates
+                    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+                    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+                    plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+
+                    # Add legend
+                    ax.legend(
+                        loc='upper right',
+                        frameon=True,
+                        fancybox=True,
+                        shadow=True
+                    )
+
+                # Hide any unused subplots
+                for idx in range(len(channels) + (1 if total_spend else 0), len(axes_flat)):
+                    axes_flat[idx].set_visible(False)
+
+            else:
+                # Create a single plot for each country with all channels
+                fig, ax = plt.subplots(figsize=(12, 8), constrained_layout=True)
+
+                # Add title
+                fig.suptitle(
+                    f'Media Spend for {country}',
+                    fontsize=20,
+                    fontweight='bold',
+                    y=0.98
+                )
+
+                # Plot each channel on the same axes
+                for channel in channels:
+                    spend = dataset.spends.sel(country=country, channel=channel).values
+
+                    ax.plot(
+                        dates,
+                        spend,
+                        color=channel_colors[channel],
+                        linewidth=2.5,
+                        label=channel
+                    )
+
+                # Plot total spend if requested
+                if total_spend:
+                    total = np.zeros_like(dataset.spends.sel(country=country, channel=channels[0]).values)
+                    for channel in channels:
+                        total += dataset.spends.sel(country=country, channel=channel).values
+
+                    ax.plot(
+                        dates,
+                        total,
+                        color=channel_colors['Total'],
+                        linewidth=3.0,
+                        linestyle='--',
+                        label='Total Spend'
+                    )
+
+                # Add labels and styling
+                ax.set_xlabel('Date', fontsize=14, labelpad=10)
+                ax.set_ylabel('Spend', fontsize=14, labelpad=10)
+                ax.grid(True, linestyle='--', alpha=0.6)
+
+                # Format x-axis dates
+                ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+                plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+
+                # Add legend
+                ax.legend(
+                    loc='upper right',
+                    frameon=True,
+                    fancybox=True,
+                    shadow=True
+                )
+
+            figure_objects.append(fig)
+
+        # Return the last figure if only one country, or all figures as a list
+        if len(countries) == 1:
+            return figure_objects[0]
+        else:
+            return figure_objects
+
+    @staticmethod
     def plot_media_transformations(dataset, country_params, countries, dynamics_dict=None):
         """
         Plot media spend transformations (original, adstocked, saturated) for each country and channel
@@ -684,7 +896,6 @@ class MMMVisualizer:
                 spend = dataset.spends.sel(country=country, channel=channel).values
 
                 # Calculate transformations
-                from pymc_marketing.mmm.transformers import geometric_adstock, logistic_saturation
                 adstocked = geometric_adstock(spend, alpha, l_max=8, normalize=True).eval()
                 saturated = logistic_saturation(adstocked, lam).eval()
 
@@ -827,3 +1038,444 @@ class MMMVisualizer:
             return figure_objects[0]
         else:
             return figure_objects
+
+
+    def plot_saturation_curves(self, dataset, country_params, countries, show_raw_data=True):
+        """
+        Plot saturation curves showing the relationship between adstocked values and
+        saturated values for each country and channel.
+
+        Parameters:
+        -----------
+        dataset : xarray.Dataset
+            The dataset containing all variables
+        country_params : dict
+            Dictionary containing parameters for each country
+        countries : list
+            List of countries to visualize
+        show_raw_data : bool, optional
+            Whether to show the actual data points in addition to the curves.
+            Defaults to True.
+
+        Returns:
+        --------
+        matplotlib.figure.Figure or list
+            The matplotlib figure object(s)
+        """
+
+        channels = dataset.coords['channel'].values
+
+        # Set up plot styling for better readability
+        plt.rcParams.update({
+            'font.size': 12,
+            'axes.labelsize': 14,
+            'axes.titlesize': 16,
+            'xtick.labelsize': 12,
+            'ytick.labelsize': 12,
+            'legend.fontsize': 12,
+            'figure.titlesize': 18
+        })
+
+        # Color palette
+        colors = {
+            'curve': '#1f77b4',  # Blue
+            'data_points': '#ff7f0e',  # Orange
+            'grid': '#cccccc'  # Light gray
+        }
+
+        figure_objects = []
+
+        for country in countries:
+            # Create a figure with subplots for each channel
+            fig, axes = plt.subplots(
+                1,
+                len(channels),
+                figsize=(7 * len(channels), 6),
+                constrained_layout=True
+            )
+
+            # Handle the case of a single channel
+            if len(channels) == 1:
+                axes = np.array([axes])
+
+            # fig.suptitle(
+            #     f'Saturation Curves for {country}',
+            #     fontsize=20,
+            #     fontweight='bold',
+            #     y=0.98
+            # )
+
+            for ch_idx, channel in enumerate(channels):
+                # Get channel-specific parameters
+                alpha = country_params[country]['alphas'][channel]
+                lam = country_params[country]['lambdas'][channel]
+
+                # Get original spend data
+                spend = dataset.spends.sel(country=country, channel=channel).values
+
+                # Calculate adstock transformation
+                adstocked = geometric_adstock(spend, alpha, l_max=8, normalize=True).eval()
+
+                if show_raw_data:
+                    # Plot actual data points
+                    axes[ch_idx].scatter(
+                        adstocked,
+                        logistic_saturation(adstocked, lam).eval(),
+                        color=colors['data_points'],
+                        alpha=0.5,
+                        s=30,
+                        label='Observed Data'
+                    )
+
+                # Generate points for a smooth curve
+                x_range = np.linspace(0, max(adstocked) * 1.1, 1000)
+                y_values = logistic_saturation(x_range, lam).eval()
+
+                # Plot the saturation curve
+                axes[ch_idx].plot(
+                    x_range,
+                    y_values,
+                    color=colors['curve'],
+                    linewidth=3,
+                    label=f'Saturation Curve (λ={lam:.2f})'
+                )
+
+                # Add annotations and styling
+                axes[ch_idx].set_title(f'{channel} Saturation Curve', fontsize=16, pad=10)
+                axes[ch_idx].set_xlabel('Adstocked Media Spend', fontsize=14, labelpad=10)
+                axes[ch_idx].set_ylabel('Saturated Response', fontsize=14, labelpad=10)
+                axes[ch_idx].grid(True, linestyle='--', alpha=0.6, color=colors['grid'])
+
+                # Add legend with improved styling
+                legend = axes[ch_idx].legend(
+                    loc='upper left',
+                    frameon=True,
+                    fancybox=True,
+                    shadow=True,
+                    fontsize=12
+                )
+
+                # Set axis limits
+                axes[ch_idx].set_xlim(0, max(adstocked) * 1.1)
+                axes[ch_idx].set_ylim(0, 1.05)
+
+            figure_objects.append(fig)
+
+        # Return the last figure if only one country, or all figures as a list
+        if len(countries) == 1:
+            return figure_objects[0]
+        else:
+            return figure_objects
+
+    def calculate_simple_roas(self, dataset, countries, channels, time_constraint=None):
+        """
+        Calculate incremental ROAS using the direct method:
+        ROAS = total media response / total media spend
+
+        Parameters:
+        -----------
+        dataset : xarray.Dataset
+            Dataset containing media_response and spends variables
+        countries : list
+            List of countries to analyze
+        channels : list
+            List of channels to analyze
+        time_constraint : tuple, dict, slice, list, or xarray.Dataset, optional
+            Specifies which time periods to include in the calculation.
+            Can be:
+            - tuple of (start_idx, end_idx) to apply to all countries
+            - dict mapping country to (start_idx, end_idx) tuples
+            - slice object to select specific indices
+            - list of specific indices to include
+            - xarray.Dataset or DataArray with 'date' coordinate to select matching dates
+            If None, all time periods are used.
+
+        Returns:
+        --------
+        dict
+            Dictionary of ROAS by country and channel
+        """
+
+        # Initialize results dictionary
+        roas_results = {}
+
+        # Get date dimension from dataset
+        all_dates = dataset.coords['date'].values
+
+        # Process time_constraint to get indices for each country
+        if time_constraint is None:
+            # Use all available dates for all countries
+            selected_dates = all_dates
+        elif isinstance(time_constraint, tuple) and len(time_constraint) == 2:
+            # Same start/end indices for all countries
+            start_idx, end_idx = time_constraint
+            selected_dates = all_dates[start_idx:end_idx+1]
+        elif hasattr(time_constraint, 'coords') and 'date' in time_constraint.coords:
+            # Handle xarray.Dataset or xarray.DataArray with date coordinate
+            selected_dates = time_constraint.coords['date'].values
+        elif isinstance(time_constraint, dict):
+            # Different indices for each country - handle at country level
+            selected_dates = None  # Will be set per country
+        elif isinstance(time_constraint, slice):
+            # Same slice for all countries
+            selected_dates = all_dates[time_constraint]
+        elif hasattr(time_constraint, '__iter__'):
+            # Specific list of indices for all countries
+            if all(isinstance(i, (int, np.integer)) for i in time_constraint):
+                # List of integer indices
+                selected_dates = all_dates[list(time_constraint)]
+            else:
+                # Assume it's a list of date values
+                selected_dates = np.array(time_constraint)
+        else:
+            raise ValueError("Invalid time_constraint format")
+
+        for country in countries:
+            roas_results[country] = {}
+
+            # Handle country-specific date selection if time_constraint is a dict
+            if isinstance(time_constraint, dict) and selected_dates is None:
+                if country in time_constraint:
+                    constraint = time_constraint[country]
+                    if isinstance(constraint, tuple) and len(constraint) == 2:
+                        start_idx, end_idx = constraint
+                        country_dates = all_dates[start_idx:end_idx+1]
+                    elif hasattr(constraint, 'coords') and 'date' in constraint.coords:
+                        # Handle xarray with date coordinate
+                        country_dates = constraint.coords['date'].values
+                    elif isinstance(constraint, slice):
+                        country_dates = all_dates[constraint]
+                    elif hasattr(constraint, '__iter__'):
+                        if all(isinstance(i, (int, np.integer)) for i in constraint):
+                            country_dates = all_dates[list(constraint)]
+                        else:
+                            country_dates = np.array(constraint)
+                    else:
+                        country_dates = all_dates
+                else:
+                    country_dates = all_dates
+            else:
+                country_dates = selected_dates
+
+            # Get total spend and response for each channel
+            for channel in channels:
+                # Select data for specific dates
+                channel_data = dataset.sel(country=country, channel=channel, date=country_dates)
+
+                # Get response and spend
+                response = channel_data.media_response.values * 10 ## Amplitude
+                spend = channel_data.spends.values
+
+                # Calculate total response and spend
+                total_response = np.sum(response)
+                total_spend = np.sum(spend)
+
+                # Calculate ROAS (response/spend)
+                if total_spend > 0:
+                    roas = total_response / total_spend
+                else:
+                    roas = np.nan
+
+                # Store results
+                roas_results[country][channel] = {
+                    'total_response': float(total_response),
+                    'total_spend': float(total_spend),
+                    'roas': float(roas)
+                }
+
+            # Calculate overall ROAS for this country
+            total_country_response = sum(
+                roas_results[country][channel]['total_response']
+                for channel in channels
+            )
+            total_country_spend = sum(
+                roas_results[country][channel]['total_spend']
+                for channel in channels
+            )
+
+            if total_country_spend > 0:
+                overall_roas = total_country_response / total_country_spend
+            else:
+                overall_roas = np.nan
+
+            roas_results[country]['overall'] = {
+                'total_response': float(total_country_response),
+                'total_spend': float(total_country_spend),
+                'roas': float(overall_roas)
+            }
+
+        return roas_results
+
+    def calculate_incremental_roas(self, dataset, model, X, media_columns, test_indices):
+        """
+        Calculate incremental ROAS using the counterfactual approach:
+        ROAS = (baseline prediction - zeroed channel prediction).sum() / channel spend.sum()
+
+        Parameters:
+        -----------
+        dataset : xarray.Dataset
+            Dataset containing original data
+        model : object
+            Fitted model object
+        X : DataFrame
+            Feature data
+        media_columns : list
+            List of media columns
+        test_indices : list or array-like
+            Indices to use for testing
+
+        Returns:
+        --------
+        dict
+            Dictionary of incremental ROAS by channel
+        """
+
+        # Get test data
+        X_test = X.iloc[test_indices] if hasattr(test_indices, '__iter__') else X.loc[test_indices]
+
+        # Get baseline prediction
+        baseline_prediction = model.predict(test_indices=test_indices)
+
+        # Calculate incremental ROAS for each channel
+        roas_results = {}
+
+        for channel in media_columns:
+            # Create copy of test data with channel zeroed out
+            X_zeroed = X_test.copy()
+            X_zeroed[channel] = 0
+
+            # Store original spend
+            original_spend = X_test[channel].values
+            total_spend = np.sum(original_spend)
+
+            try:
+                # Try to use the model's existing predict method with test_indices
+                # This assumes model.predict() is implemented to handle zeroed channels
+
+                # Create temporary X with zeroed channel for entire dataset
+                X_temp = X.copy()
+                X_temp.loc[X_test.index, channel] = 0
+
+                # Using model's predict method with test_indices
+                zeroed_prediction = model.predict(test_indices=test_indices, X_new=X_temp)
+
+            except Exception as e:
+                print(f"Warning: Using fallback prediction method for {channel}. Error: {e}")
+
+                # Fallback approach: Try to manually create transformed features and predict
+                # This code will need customization based on your specific model implementation
+                if hasattr(model, 'transform_features'):
+                    # If model has a transform_features method, use it
+                    X_transformed = model.transform_features(X_zeroed)
+                    zeroed_prediction = model.model.predict(X_transformed)
+                elif hasattr(model, 'model') and hasattr(model.model, 'predict'):
+                    # Direct prediction with model's underlying model
+                    zeroed_prediction = model.model.predict(X_zeroed)
+                else:
+                    # No suitable prediction method found
+                    print(f"Error: Could not generate zeroed prediction for {channel}")
+                    zeroed_prediction = baseline_prediction  # Use baseline as fallback
+
+            # Calculate incremental contribution
+            incremental_contribution = np.sum(baseline_prediction - zeroed_prediction)
+
+            # Calculate incremental ROAS
+            if total_spend > 0:
+                incremental_roas = incremental_contribution / total_spend
+            else:
+                incremental_roas = np.nan
+
+            # Store results
+            roas_results[channel] = {
+                'incremental_contribution': float(incremental_contribution),
+                'total_spend': float(total_spend),
+                'incremental_roas': float(incremental_roas),
+                'baseline_prediction_sum': float(np.sum(baseline_prediction)),
+                'zeroed_prediction_sum': float(np.sum(zeroed_prediction))
+            }
+
+        return roas_results
+
+    def visualize_roas(self, roas_results, countries=None, channels=None, plot_type='bar'):
+        """
+        Visualize ROAS results
+
+        Parameters:
+        -----------
+        roas_results : dict
+            Dictionary of ROAS results
+        countries : list, optional
+            List of countries to visualize, defaults to all
+        channels : list, optional
+            List of channels to visualize, defaults to all
+        plot_type : str, optional
+            Type of plot to create ('bar' or 'heatmap')
+
+        Returns:
+        --------
+        matplotlib.figure.Figure
+            The matplotlib figure object
+        """
+
+        # If no countries specified, use all
+        if countries is None:
+            countries = list(roas_results.keys())
+
+        # Prepare data for plotting
+        plot_data = []
+
+        for country in countries:
+            # If no channels specified, use all except 'overall'
+            country_channels = channels if channels else [ch for ch in roas_results[country].keys() if ch != 'overall']
+
+            for channel in country_channels:
+                # Get ROAS value
+                roas_value = roas_results[country][channel].get('roas',
+                            roas_results[country][channel].get('incremental_roas', np.nan))
+
+                # Add to plot data
+                plot_data.append({
+                    'Country': country,
+                    'Channel': channel,
+                    'ROAS': roas_value
+                })
+
+        # Convert to DataFrame
+        df = pd.DataFrame(plot_data)
+
+        # Create appropriate plot
+        if plot_type == 'heatmap':
+            # Create heatmap
+            plt.figure(figsize=(10, 8))
+            pivot_data = df.pivot(index='Country', columns='Channel', values='ROAS')
+            ax = sns.heatmap(pivot_data, annot=True, cmap='RdYlGn', center=1.0, fmt='.2f',
+                            linewidths=0.5, cbar_kws={'label': 'ROAS'})
+            plt.title('ROAS by Country and Channel', fontsize=16)
+            plt.tight_layout()
+
+        else:  # Default to bar plot
+            # Create grouped bar plot
+            plt.figure(figsize=(12, 8))
+            ax = sns.barplot(x='Channel', y='ROAS', hue='Country', data=df)
+
+            # Add labels and title
+            plt.xlabel('Channel', fontsize=14)
+            plt.ylabel('ROAS', fontsize=14)
+            plt.title('ROAS by Channel and Country', fontsize=16)
+            plt.legend(title='Country')
+
+            # Add value labels on bars
+            for i, bar in enumerate(ax.patches):
+                height = bar.get_height()
+                if not np.isnan(height):
+                    ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        height + 0.05,
+                        f'{height:.2f}',
+                        ha='center', va='bottom'
+                    )
+
+            plt.grid(axis='y', alpha=0.3, linestyle='--')
+            plt.tight_layout()
+
+        return plt.gcf()

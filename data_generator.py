@@ -27,12 +27,12 @@ class MMMDataGenerator:
                 'TV': 1.5,
                 'Radio': 2,
                 'OOH': 1,
-                'Digital': 7
+                'Digital': 6
             },
             'lambda_country_sigma': 0.4,
 
             'effect_channel_base': {
-                'TV': 5.0,
+                'TV': 10,
                 'Radio': 6.0,
                 'OOH': 4.7,
                 'Digital': 8
@@ -127,7 +127,7 @@ class MMMDataGenerator:
                 # Generate more consistent digital spending
                 base_spend = self.rng.uniform(0, 1, size=n_dates)
                 spend = np.where(base_spend > (1 - base_prob),
-                               base_spend * 2,
+                               base_spend * 0.75,
                                base_spend )
             else:
                 # Generate sparser traditional media spending
